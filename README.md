@@ -191,7 +191,7 @@ stderr_logfile=/var/log/supervisor/volatile-err.log
 git clone https://github.com/nanikore7250/VolatileCyberDefense.git
 cd VolatileCyberDefense
 pip install flask
-supervisord -c vcd.conf
+supervisord -c volatile.conf
 ```
 
 Visit `http://localhost:5000` and try submitting a normal name, then an attack payload.
