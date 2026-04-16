@@ -2,3 +2,4 @@ venv
 volatile-app.log
 volatile-err.log
 forensics.jsonl
+__pycache__
