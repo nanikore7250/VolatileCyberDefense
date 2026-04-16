@@ -94,7 +94,7 @@ A minimal Flask application that:
 VolatileCyberDefense/
 ├── app.py              # Flask app with VCD behavior
 ├── forensics.jsonl     # Append-only forensic log (survives process death)
-├── vcd.conf            # supervisord config for auto-restart
+├── volatile.conf       # supervisord config for auto-restart
 └── README.md
 ```
 
