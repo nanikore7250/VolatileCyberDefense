@@ -1,3 +1,4 @@
 venv
 volatile-app.log
 volatile-err.log
+forensics.jsonl
