@@ -162,12 +162,13 @@ app.run(port=5000)
 ### supervisord config
 
 ```ini
-[program:vcd]
-command=python /root/VolatileCyberDefense/app.py
+[program:volatile]
+command=/root/VolatileCyberDefense/venv/bin/python /root/VolatileCyberDefense/app.py
 autostart=true
 autorestart=true
-stderr_logfile=/var/log/vcd.err.log
-stdout_logfile=/var/log/vcd.out.log
+stopsignal=QUIT
+stdout_logfile=/var/log/supervisor/volatile-app.log
+stderr_logfile=/var/log/supervisor/volatile-err.log
 ```
 
 ### Forensic output example
@@ -187,7 +188,7 @@ stdout_logfile=/var/log/vcd.out.log
 ## Getting Started
 
 ```bash
-git clone https://github.com/yourname/VolatileCyberDefense.git
+git clone https://github.com/nanikore7250/VolatileCyberDefense.git
 cd VolatileCyberDefense
 pip install flask
 supervisord -c vcd.conf
