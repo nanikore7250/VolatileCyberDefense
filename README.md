@@ -198,12 +198,98 @@ Visit `http://localhost:5000` and try submitting a normal name, then an attack p
 
 ---
 
+## Phase 2 — Elixir / OTP
+
+Phase 2 re-implements VCD in Elixir, exploiting OTP's supervision model to make the self-destruct/recover cycle a first-class primitive.
+
+### Structure
+
+```
+vcd/
+├── mix.exs
+└── lib/vcd/
+    ├── application.ex          # OTP Application — starts Supervisor
+    ├── block_list.ex           # GenServer + ETS blocklist (survives restarts)
+    ├── validator.ex            # Parallel attack detection (Task.async_stream)
+    ├── forensics_writer.ex     # Write evidence → exit(:attack_detected)
+    ├── router.ex               # Plug.Router
+    └── plugs/
+        ├── block_check.ex      # Reject blocked IPs (403)
+        └── attack_detect.ex    # Detect attack → forensics → self-destruct
+```
+
+### Supervisor tree
+
+```
+Vcd.Application
+└── Vcd.Supervisor (one_for_one)
+    ├── VCD.BlockList     ← GenServer + ETS; persists blocklist across restarts
+    └── VCD.Router        ← Plug.Cowboy HTTP server
+```
+
+### Key design points
+
+- **ETS-backed blocklist**: stored outside the Cowboy process, so a worker crash does not clear it — blocked IPs stay blocked across supervisor restarts.
+- **Parallel input inspection**: `Task.async_stream` checks all request parameters simultaneously with a 100 ms timeout.
+- **Minimal critical path**: `ForensicsWriter.write_and_die/1` does exactly two things — append a JSON line, then `exit(:attack_detected)`. No RPC, no HTTP call.
+- **Separation of concerns**: writing evidence and restarting are decoupled. The Supervisor handles recovery; the dying process only needs to flush to disk.
+
+### Running Phase 2
+
+```bash
+cd vcd
+mix deps.get
+mix run --no-halt        # dev mode (default)
+MIX_ENV=prod mix run --no-halt  # production mode
+```
+
+Server starts on `http://localhost:4000`. Open it in a browser to use the demo form.
+
+### Debug mode
+
+| `MIX_ENV` | Blocklist after self-destruct |
+|-----------|-------------------------------|
+| `dev` (default) | **Cleared** — same IP can reconnect immediately |
+| `prod` | **Persisted** — same IP stays blocked across restarts |
+
+In debug mode, `ForensicsWriter` calls `BlockList.clear()` before `exit(:attack_detected)`, wiping both the ETS table and the on-disk `blocklist.txt`. This lets you trigger the full VCD cycle repeatedly without manually resetting state.
+
+Controlled by `config/dev.exs`:
+
+```elixir
+config :vcd, debug: true
+```
+
+#### Attack simulation
+
+```bash
+# Normal request
+curl http://localhost:4000/
+
+# XSS attack — triggers forensics write + process exit + (in dev) blocklist clear
+curl -X POST -d "username=<script>alert(1)</script>" http://localhost:4000/welcome
+
+# In dev: same IP can reconnect. In prod: 403 Forbidden.
+curl http://localhost:4000/
+
+# Forensic log
+cat /var/vcd/forensics.jsonl
+```
+
+### Forensic output example
+
+```json
+{"timestamp":"2026-04-18T04:06:51.785691Z","path":"/submit","ip":"127.0.0.1","pattern":"~r/<script/i","params":{"q":"<script>alert(1)</script>"},"method":"GET"}
+```
+
+---
+
 ## Roadmap
 
 | Phase | Language | Target | Status |
 |-------|----------|--------|--------|
 | Phase 1 | Python | Concept validation | ✅ Complete |
-| Phase 2 | Elixir / OTP | Process-level volatility with Supervisor trees | 🔲 Planned |
+| Phase 2 | Elixir / OTP | Process-level volatility with Supervisor trees | ✅ Complete |
 | Phase 3 | Elixir + Kubernetes | Multi-layer volatility (L1–L3) | 🔲 Planned |
 | Phase 4 | — | arXiv paper + OSS release | 🔲 Planned |
 
@@ -293,6 +379,6 @@ Pythonで実装した最小構成のPoCであり、以下の5ステップが一�
 | フェーズ | 言語 | 目標 |
 |---------|------|------|
 | Phase 1 | Python | 概念実証 ✅ |
-| Phase 2 | Elixir / OTP | Supervisorツリーによるプロセスレベル揮発性 |
+| Phase 2 | Elixir / OTP | Supervisorツリーによるプロセスレベル揮発性 ✅ |
 | Phase 3 | Elixir + Kubernetes | L1〜L3の多段揮発性の完成 |
 | Phase 4 | — | arXiv論文 + OSS公開 |
