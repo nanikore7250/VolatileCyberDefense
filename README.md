@@ -185,13 +185,188 @@ cat /var/vcd/forensics.jsonl
 
 ---
 
+## Phase 3 — Elixir + Kubernetes (L2 Container Volatility)
+
+Phase 3 adds **Graceful Volatile Shutdown**: when a high-severity attack is detected, the container signals Kubernetes via the Readiness Probe and terminates cleanly, triggering a fresh Pod replacement.
+
+### Multi-layer shutdown flow
+
+```
+① Attack process exits immediately  (L1 — milliseconds)
+② ShutdownState sets shutting_down = true
+③ /healthz/ready returns 503  →  k8s removes Pod from Service endpoints
+④ In-flight requests drain  (graceful mode waits timeout_ms)
+⑤ VM calls System.stop(0)  →  Pod terminates  →  k8s schedules new Pod  (L2 — seconds)
+```
+
+### Severity-based branching
+
+| Severity | Trigger | Self-destruct level |
+|----------|---------|---------------------|
+| `:low` | Single XSS / SQLi | L1 only — process restarts, container continues |
+| `:high` | 3+ attacks from same IP in 60s, or destructive SQL | L1 + L2 — full container replacement |
+
+### Shutdown modes
+
+| Mode | Behavior |
+|------|----------|
+| `:strict` | Terminate VM immediately |
+| `:graceful` | Wait `timeout_ms` for in-flight requests, then stop |
+| `:timeout` | Same as graceful — max wait then force stop |
+
+`terminationGracePeriodSeconds` in the Deployment must exceed `timeout_ms`.
+
+### Structure added in Phase 3
+
+```
+vcd/lib/vcd/
+└── shutdown_state.ex   # GenServer — manages L2 shutdown lifecycle
+
+k8s/
+├── deployment.yaml     # Pod (vcd-app + vcd-sidecar), probes, volumes
+├── service.yaml        # ClusterIP Service
+├── networkpolicy.yaml  # Egress: sidecar → Redis only
+└── configmap.yaml      # Shutdown mode / paths
+
+sidecar/
+├── watch.sh            # inotify → Redis forwarding script
+└── Dockerfile          # alpine + inotify-tools + redis-cli
+```
+
+### Sidecar data flow
+
+```
+vcd-app  →  /var/vcd/forensics.jsonl  (emptyDir volume)
+                    ↓ inotify
+vcd-sidecar  →  Redis RPUSH vcd:forensics
+             →  Redis SADD vcd:blocked_ips  (for netpol integration)
+
+※ No reverse communication from sidecar to app
+```
+
+### Deploying to Kubernetes (minikube)
+
+```bash
+# Point Docker CLI to minikube's daemon
+eval $(minikube docker-env)
+
+# Build images
+docker build -t vcd:latest ./vcd/
+docker build -t vcd-sidecar:latest ./sidecar/
+
+# Create Redis URL secret
+kubectl create secret generic vcd-secrets \
+  --from-literal=redis-url=redis://redis:6379
+
+# Apply all resources
+kubectl apply -f k8s/redis.yaml
+kubectl apply -f k8s/configmap.yaml
+kubectl apply -f k8s/deployment.yaml
+kubectl apply -f k8s/service.yaml
+
+kubectl rollout status deployment/vcd-app
+```
+
+### Attack simulation (Kubernetes)
+
+> **Note on `kubectl port-forward`**: port-forward creates a tunnel that bypasses NetworkPolicy entirely. Traffic arriving via port-forward always appears as `127.0.0.1` to the app, so the **application-layer blocklist (ETS → 403 Forbidden)** fires correctly, but the **NetworkPolicy-layer block has no effect** on port-forwarded connections. This is expected — see [Verifying NetworkPolicy blocking](#verifying-networkpolicy-blocking) below for in-cluster testing.
+
+Forward a pod port to localhost, then run the same attack sequence:
+
+```bash
+POD=$(kubectl get pod -l app=vcd -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward $POD 14000:4000
+```
+
+```bash
+# Health checks
+curl http://localhost:14000/healthz/live   # 200
+curl http://localhost:14000/healthz/ready  # 200
+
+# Normal request
+curl -X POST -d "username=Alice" http://localhost:14000/welcome
+
+# L1 attack (single XSS) — process restarts, container stays up
+curl -X POST -d "username=<script>alert(1)</script>" http://localhost:14000/welcome
+curl http://localhost:14000/healthz/ready  # still 200
+
+# L2 escalation — blocked IP retries twice more (3 total)
+# 2nd attempt: blocked with 403, attack count incremented
+curl http://localhost:14000/
+# 3rd attempt: blocked with 403, threshold reached → container_shutdown()
+curl http://localhost:14000/
+
+# Readiness probe flips to 503 — k8s removes pod from Service endpoints
+curl http://localhost:14000/healthz/ready  # 503
+curl http://localhost:14000/healthz/live   # 200 (VM still draining)
+
+# After timeout_ms (5s prod / 2s dev): VM stops, k8s schedules fresh pods
+kubectl get pods -l app=vcd
+# NAME                     READY   STATUS    RESTARTS
+# vcd-app-xxxxx-yyyyy      Error   ← terminated pod
+# vcd-app-zzzzz-aaaaa      2/2     Running   ← new clean pod
+# vcd-app-zzzzz-bbbbb      2/2     Running   ← new clean pod
+```
+
+### Verifying NetworkPolicy blocking
+
+NetworkPolicy operates at the pod network layer and only affects traffic routed through the CNI (pod-to-pod, service-to-pod). To verify that a blocked IP is dropped at the network layer, send requests from a pod inside the cluster:
+
+```bash
+# Launch a temporary curl pod inside the cluster
+kubectl run curl-test --image=curlimages/curl --restart=Never --rm -it -- sh
+
+# Inside the pod — attack from this pod's IP
+curl -X POST -d "username=<script>alert(1)</script>" http://vcd:4000/welcome
+# → connection succeeds, attack detected, this pod's IP is blocked
+
+# After SYNC_INTERVAL (30s), the NetworkPolicy is patched.
+# Subsequent requests from this pod are dropped at the network layer (connection timeout),
+# not rejected with 403 — the packet never reaches the app.
+curl --max-time 5 http://vcd:4000/
+# → curl: (28) Operation timed out  ← NetworkPolicy drop confirmed
+```
+
+Check that the NetworkPolicy was patched:
+
+```bash
+kubectl get networkpolicy vcd-block-policy \
+  -o jsonpath='{.spec.ingress[0].from[0].ipBlock}' | python3 -m json.tool
+# {
+#   "cidr": "0.0.0.0/0",
+#   "except": ["<pod-ip>/32"]
+# }
+```
+
+### Unblocking IPs (for repeated testing)
+
+After an attack, the attacker's IP is persisted in three places. Clear all three to reset state:
+
+```bash
+POD=$(kubectl get pod -l app=vcd -o jsonpath='{.items[0].metadata.name}')
+
+# 1. Clear application-layer blocklist (ETS + blocklist.txt) via VCD.BlockList.clear/0
+kubectl exec $POD -c vcd-app -- /app/_build/prod/rel/vcd/bin/vcd rpc "VCD.BlockList.clear()"
+
+# 2. Remove IP(s) from Redis
+kubectl exec $POD -c vcd-sidecar -- sh -c 'redis-cli -u "$REDIS_URL" DEL vcd:blocked_ips'
+
+# 3. Patch NetworkPolicy to clear except[] list
+kubectl patch networkpolicy vcd-block-policy --type=merge \
+  -p '{"spec":{"ingress":[{"from":[{"ipBlock":{"cidr":"0.0.0.0/0","except":[]}}],"ports":[{"protocol":"TCP","port":4000}]}]}}'
+```
+
+> **Note**: Steps 2 and 3 are only needed in a Kubernetes environment. In local dev (`mix run`), blocklist is automatically cleared on self-destruct because `debug: true` is set in `dev.exs`.
+
+---
+
 ## Roadmap
 
 | Phase | Language | Target | Status |
 |-------|----------|--------|--------|
 | Phase 1 | Python | Concept validation | ✅ Complete — [see phase1/python](https://github.com/nanikore7250/VolatileCyberDefense/tree/phase1/python) |
-| Phase 2 | Elixir / OTP | Process-level volatility with Supervisor trees | ✅ Complete |
-| Phase 3 | Elixir + Kubernetes | Multi-layer volatility (L1–L3) | 🔲 Planned |
+| Phase 2 | Elixir / OTP | Process-level volatility with Supervisor trees | ✅ Complete — [see phase1/python](https://github.com/nanikore7250/VolatileCyberDefense/tree/phase2/elixir) |
+| Phase 3 | Elixir + Kubernetes | Multi-layer volatility (L1–L3) | ✅ Complete |
 | Phase 4 | — | arXiv paper + OSS release | 🔲 Planned |
 
 ---
@@ -281,5 +456,5 @@ Elixir / OTP で実装した最小構成のPoCであり、以下の5ステップ
 |---------|------|------|
 | Phase 1 | Python | 概念実証 ✅ |
 | Phase 2 | Elixir / OTP | Supervisorツリーによるプロセスレベル揮発性 ✅ |
-| Phase 3 | Elixir + Kubernetes | L1〜L3の多段揮発性の完成 |
+| Phase 3 | Elixir + Kubernetes | L1〜L3の多段揮発性の完成 ✅ |
 | Phase 4 | — | arXiv論文 + OSS公開 |

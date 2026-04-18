@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vcd-app
+  labels:
+    app: vcd
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: vcd
+  template:
+    metadata:
+      labels:
+        app: vcd
+    spec:
+      # Must be longer than shutdown.timeout_ms to allow graceful drain
+      terminationGracePeriodSeconds: 30
+      serviceAccountName: vcd-sidecar
+
+      volumes:
+        - name: forensics
+          emptyDir: {}
+
+      containers:
+        # ── Main application (Elixir/Plug) ──────────────────────────────
+        - name: vcd-app
+          image: vcd:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4000
+          env:
+            - name: MIX_ENV
+              value: prod
+          volumeMounts:
+            - name: forensics
+              mountPath: /var/vcd
+
+          readinessProbe:
+            httpGet:
+              path: /healthz/ready
+              port: 4000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 1
+
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+
+        # ── Sidecar (inotify → Redis) ────────────────────────────────────
+        - name: vcd-sidecar
+          image: vcd-sidecar:latest
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: forensics
+              mountPath: /var/vcd
+          env:
+            - name: FORENSICS_PATH
+              value: /var/vcd/forensics.jsonl
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: vcd-secrets
+                  key: redis-url
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
