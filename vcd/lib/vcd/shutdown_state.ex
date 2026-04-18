@@ -24,6 +24,8 @@ defmodule VCD.ShutdownState do
 
   @impl true
   def init(_) do
+    # Own the attack counter table so it survives Cowboy handler crashes
+    :ets.new(:vcd_attack_counter, [:named_table, :duplicate_bag, :public])
     {:ok, %{shutting_down: false}}
   end
 

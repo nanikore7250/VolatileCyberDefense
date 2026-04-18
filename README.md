@@ -244,6 +244,68 @@ vcd-sidecar  →  Redis RPUSH vcd:forensics
 ※ No reverse communication from sidecar to app
 ```
 
+### Deploying to Kubernetes (minikube)
+
+```bash
+# Point Docker CLI to minikube's daemon
+eval $(minikube docker-env)
+
+# Build images
+docker build -t vcd:latest ./vcd/
+docker build -t vcd-sidecar:latest ./sidecar/
+
+# Create Redis URL secret
+kubectl create secret generic vcd-secrets \
+  --from-literal=redis-url=redis://redis:6379
+
+# Apply all resources
+kubectl apply -f k8s/redis.yaml
+kubectl apply -f k8s/configmap.yaml
+kubectl apply -f k8s/deployment.yaml
+kubectl apply -f k8s/service.yaml
+
+kubectl rollout status deployment/vcd-app
+```
+
+### Attack simulation (Kubernetes)
+
+Forward a pod port to localhost, then run the same attack sequence:
+
+```bash
+POD=$(kubectl get pod -l app=vcd -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward $POD 14000:4000
+```
+
+```bash
+# Health checks
+curl http://localhost:14000/healthz/live   # 200
+curl http://localhost:14000/healthz/ready  # 200
+
+# Normal request
+curl -X POST -d "username=Alice" http://localhost:14000/welcome
+
+# L1 attack (single XSS) — process restarts, container stays up
+curl -X POST -d "username=<script>alert(1)</script>" http://localhost:14000/welcome
+curl http://localhost:14000/healthz/ready  # still 200
+
+# L2 escalation — blocked IP retries twice more (3 total)
+# 2nd attempt: blocked with 403, attack count incremented
+curl http://localhost:14000/
+# 3rd attempt: blocked with 403, threshold reached → container_shutdown()
+curl http://localhost:14000/
+
+# Readiness probe flips to 503 — k8s removes pod from Service endpoints
+curl http://localhost:14000/healthz/ready  # 503
+curl http://localhost:14000/healthz/live   # 200 (VM still draining)
+
+# After timeout_ms (5s prod / 2s dev): VM stops, k8s schedules fresh pods
+kubectl get pods -l app=vcd
+# NAME                     READY   STATUS    RESTARTS
+# vcd-app-xxxxx-yyyyy      Error   ← terminated pod
+# vcd-app-zzzzz-aaaaa      2/2     Running   ← new clean pod
+# vcd-app-zzzzz-bbbbb      2/2     Running   ← new clean pod
+```
+
 ---
 
 ## Roadmap

@@ -56,8 +56,8 @@ defmodule VCD.Validator do
   end
 
   def handle_detection(evidence) do
-    severity = assess_severity(evidence)
     record_attack(evidence[:ip])
+    severity = assess_severity(evidence)
 
     case severity do
       :low -> VCD.ShutdownState.process_only()
@@ -80,27 +80,26 @@ defmodule VCD.Validator do
   # Simple in-memory recent attack counter using ETS
   @counter_table :vcd_attack_counter
 
+  # Called from BlockCheck when a blocked IP attempts access again
+  def record_repeat_attempt(ip) do
+    record_attack(ip)
+    count = recent_attack_count(ip)
+
+    if count >= 3 and not VCD.ShutdownState.shutting_down?() do
+      VCD.ShutdownState.container_shutdown()
+    end
+  end
+
   defp record_attack(ip) do
-    ensure_counter_table()
-    now = System.monotonic_time(:second)
-    :ets.insert(@counter_table, {:"#{ip}_#{now}", ip})
+    now = System.monotonic_time(:millisecond)
+    :ets.insert(@counter_table, {now, ip})
   end
 
   defp recent_attack_count(ip) do
-    ensure_counter_table()
-    window = System.monotonic_time(:second) - 60
+    window = System.monotonic_time(:millisecond) - 60_000
     :ets.tab2list(@counter_table)
-    |> Enum.count(fn {key, stored_ip} ->
-      stored_ip == ip &&
-        (key |> to_string() |> String.split("_") |> List.last() |> String.to_integer() > window)
-    end)
+    |> Enum.count(fn {ts, stored_ip} -> stored_ip == ip && ts > window end)
   rescue
     _ -> 0
-  end
-
-  defp ensure_counter_table do
-    if :ets.whereis(@counter_table) == :undefined do
-      :ets.new(@counter_table, [:named_table, :bag, :public])
-    end
   end
 end

@@ -12,6 +12,8 @@ defmodule VCD.Plugs.BlockCheck do
     ip = conn.remote_ip |> :inet.ntoa() |> to_string()
 
     if VCD.BlockList.blocked?(ip) do
+      # Blocked IP still attempting access — counts as repeat attack for L2 escalation
+      VCD.Validator.record_repeat_attempt(ip)
       conn
       |> send_resp(403, "Forbidden")
       |> halt()
