@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: Proof of Concept](https://img.shields.io/badge/Status-Proof%20of%20Concept-blue)]()
-[![Python](https://img.shields.io/badge/Python-3.x-green)]()
+[![Elixir](https://img.shields.io/badge/Elixir-1.19-purple)]()
 
 ---
 
@@ -43,9 +43,9 @@ Attack → Detect → Preserve Evidence → Self-Destruct → Recover Clean → 
 |-------|--------|---------|
 | ① Detect | Pattern match on request | Identify attack before damage |
 | ② Forensics | Write evidence to external storage | Preserve proof before dying |
-| ③ Self-Destruct | `os._exit(1)` | Eliminate contaminated state |
-| ④ Recover | Supervisor auto-restarts process | Return to clean state |
-| ⑤ Block | Load blocklist on startup | Prevent re-entry from same source |
+| ③ Self-Destruct | `exit(:attack_detected)` | Eliminate contaminated state |
+| ④ Recover | OTP Supervisor auto-restarts process | Return to clean state |
+| ⑤ Block | ETS-backed blocklist survives restart | Prevent re-entry from same source |
 
 The key insight: **the attacker never gets to operate in a contaminated state, and they cannot erase their tracks because the evidence was already sent before the process died.**
 
@@ -61,8 +61,8 @@ L2: Container Layer (Kubernetes Pod)          — seconds
 L3: Node Layer      (Kubernetes Cluster)      — minutes
 ```
 
-This PoC demonstrates **L1** — process-level volatility in Python.
-Full implementation targeting Elixir + Kubernetes is planned.
+This implementation demonstrates **L1** — process-level volatility with Elixir/OTP.
+Full multi-layer implementation targeting Elixir + Kubernetes is planned.
 
 ---
 
@@ -77,124 +77,111 @@ Full implementation targeting Elixir + Kubernetes is planned.
 
 ---
 
-## This Proof of Concept
-
-### What it demonstrates
-
-A minimal Flask application that:
-1. Detects XSS and SQL injection patterns in user input
-2. Writes forensic evidence to an append-only file before dying
-3. Calls `os._exit(1)` to immediately terminate the process
-4. Is restarted automatically by `supervisord`
-5. Loads the blocklist on startup to reject the attacker's IP
+## Implementation — Elixir / OTP
 
 ### Structure
 
 ```
-VolatileCyberDefense/
-├── app.py              # Flask app with VCD behavior
-├── forensics.jsonl     # Append-only forensic log (survives process death)
-├── volatile.conf       # supervisord config for auto-restart
-└── README.md
+vcd/
+├── mix.exs
+├── config/
+│   ├── dev.exs     # debug: true
+│   └── prod.exs    # debug: false
+└── lib/vcd/
+    ├── application.ex          # OTP Application — starts Supervisor
+    ├── block_list.ex           # GenServer + ETS blocklist (survives restarts)
+    ├── validator.ex            # Parallel attack detection (Task.async_stream)
+    ├── forensics_writer.ex     # Write evidence → exit(:attack_detected)
+    ├── router.ex               # Plug.Router + demo form
+    └── plugs/
+        ├── block_check.ex      # Reject blocked IPs (403)
+        └── attack_detect.ex    # Detect attack → forensics → self-destruct
 ```
 
-### app.py
+### Supervisor tree
 
-```python
-from flask import Flask, request
-import os
-import json
-from datetime import datetime
-import re
-
-XSS_PATTERN = re.compile(r"<script|alert\(|onerror=", re.IGNORECASE)
-SQLI_PATTERN = re.compile(r"(\bOR\b|\bAND\b|--|;|'|\bUNION\b)", re.IGNORECASE)
-
-app = Flask(__name__)
-BLOCKLIST = set()
-
-def send_forensics(reason, request):
-    evidence = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "reason": reason,
-        "ip": request.remote_addr,
-        "payload": request.form.get("username"),
-        "headers": dict(request.headers)
-    }
-    with open("/root/VolatileCyberDefense/forensics.jsonl", "a") as f:
-        f.write(json.dumps(evidence) + "\n")
-
-def load_blocklist():
-    try:
-        with open("/root/VolatileCyberDefense/forensics.jsonl") as f:
-            for line in f:
-                evidence = json.loads(line)
-                BLOCKLIST.add(evidence["ip"])
-    except FileNotFoundError:
-        pass
-
-@app.before_request
-def check_blocklist():
-    if request.remote_addr in BLOCKLIST:
-        return "blocked", 403
-
-@app.route('/welcome', methods=['POST'])
-def welcome():
-    username = request.form["username"]
-    if XSS_PATTERN.search(username) or SQLI_PATTERN.search(username):
-        send_forensics("XSS or SQL injection attack detected", request)
-        os._exit(1)
-    return "ようこそ、" + username + "さん"
-
-@app.route('/')
-def index():
-    return """
-    <form action="/welcome" method="POST">
-        <input type="text" name="username" placeholder="Your name"><br />
-        <input type="submit" value="login">
-    </form>
-    """
-
-load_blocklist()
-app.run(port=5000)
+```
+Vcd.Application
+└── Vcd.Supervisor (one_for_one)
+    ├── VCD.BlockList     ← GenServer + ETS; persists blocklist across restarts
+    └── VCD.Router        ← Plug.Cowboy HTTP server
 ```
 
-### supervisord config
+### Key design points
 
-```ini
-[program:volatile]
-command=/root/VolatileCyberDefense/venv/bin/python /root/VolatileCyberDefense/app.py
-autostart=true
-autorestart=true
-stopsignal=QUIT
-stdout_logfile=/var/log/supervisor/volatile-app.log
-stderr_logfile=/var/log/supervisor/volatile-err.log
+- **ETS-backed blocklist**: stored outside the Cowboy process, so a worker crash does not clear it — blocked IPs stay blocked across supervisor restarts.
+- **Parallel input inspection**: `Task.async_stream` checks all request parameters simultaneously with a 100 ms timeout.
+- **Minimal critical path**: `ForensicsWriter.write_and_die/1` does exactly two things — append a JSON line, then `exit(:attack_detected)`. No RPC, no HTTP call.
+- **Separation of concerns**: writing evidence and restarting are decoupled. The Supervisor handles recovery; the dying process only needs to flush to disk.
+- **VM forensics**: at the moment of self-destruct, process memory, reductions, message queue length, and full stacktrace are captured and written to the forensic log.
+
+### Getting Started
+
+```bash
+git clone https://github.com/nanikore7250/VolatileCyberDefense.git
+cd VolatileCyberDefense/vcd
+mix deps.get
+mix run --no-halt        # dev mode (default)
+MIX_ENV=prod mix run --no-halt  # production mode
+```
+
+Open `http://localhost:4000` in a browser to use the demo form.
+
+### Debug mode
+
+| `MIX_ENV` | Blocklist after self-destruct |
+|-----------|-------------------------------|
+| `dev` (default) | **Cleared** — same IP can reconnect immediately |
+| `prod` | **Persisted** — same IP stays blocked across restarts |
+
+In debug mode, `ForensicsWriter` calls `BlockList.clear()` before `exit(:attack_detected)`, wiping both the ETS table and the on-disk `blocklist.txt`. This lets you trigger the full VCD cycle repeatedly without manually resetting state.
+
+### Attack simulation
+
+```bash
+# Normal request
+curl http://localhost:4000/
+
+# XSS attack — triggers forensics write + process exit + (in dev) blocklist clear
+curl -X POST -d "username=<script>alert(1)</script>" http://localhost:4000/welcome
+
+# In dev: same IP can reconnect. In prod: 403 Forbidden.
+curl http://localhost:4000/
+
+# Forensic log
+cat /var/vcd/forensics.jsonl
 ```
 
 ### Forensic output example
 
 ```json
 {
-  "timestamp": "2026-04-16T10:23:45.123456",
-  "reason": "XSS or SQL injection attack detected",
-  "ip": "192.168.1.100",
-  "payload": "<script>alert('xss')</script>",
-  "headers": { "User-Agent": "...", "Content-Type": "..." }
+  "timestamp": "2026-04-18T04:44:34.739094Z",
+  "method": "POST",
+  "path": "/welcome",
+  "ip": "127.0.0.1",
+  "pattern": "~r/<script/i",
+  "params": { "username": "<script>alert(1)</script>" },
+  "vm": {
+    "pid": "#PID<0.424.0>",
+    "node": ":nonode@nohost",
+    "process_count": 355,
+    "scheduler_id": 15,
+    "memory": { "total": 70476136, "processes": 16364360, "... ": "..." },
+    "process": {
+      "memory_bytes": 8928,
+      "reductions": 4617,
+      "message_queue_len": 0,
+      "status": ":running",
+      "stacktrace": [
+        "Elixir.VCD.ForensicsWriter.write_and_die/1 (lib/vcd/forensics_writer.ex:10)",
+        "Elixir.VCD.Router.plug_builder_call/2 (lib/vcd/router.ex:1)",
+        "..."
+      ]
+    }
+  }
 }
 ```
-
----
-
-## Getting Started
-
-```bash
-git clone https://github.com/nanikore7250/VolatileCyberDefense.git
-cd VolatileCyberDefense
-pip install flask
-supervisord -c volatile.conf
-```
-
-Visit `http://localhost:5000` and try submitting a normal name, then an attack payload.
 
 ---
 
@@ -202,16 +189,16 @@ Visit `http://localhost:5000` and try submitting a normal name, then an attack p
 
 | Phase | Language | Target | Status |
 |-------|----------|--------|--------|
-| Phase 1 | Python | Concept validation | ✅ Complete |
-| Phase 2 | Elixir / OTP | Process-level volatility with Supervisor trees | 🔲 Planned |
+| Phase 1 | Python | Concept validation | ✅ Complete — [see phase1/python](https://github.com/nanikore7250/VolatileCyberDefense/tree/phase1/python) |
+| Phase 2 | Elixir / OTP | Process-level volatility with Supervisor trees | ✅ Complete |
 | Phase 3 | Elixir + Kubernetes | Multi-layer volatility (L1–L3) | 🔲 Planned |
 | Phase 4 | — | arXiv paper + OSS release | 🔲 Planned |
 
 ---
 
-## Known Limitations of this PoC
+## Known Limitations
 
-- Pattern matching is naive (regex-based, not semantic)
+- Pattern matching is regex-based, not semantic
 - Blocklist is IP-based (NAT / proxies can affect innocent users)
 - Forensic log is local file (should be remote/immutable in production)
 - No protection against DoS via intentional false positives
@@ -278,13 +265,13 @@ VCDはこれを構造的に不可能にする。プロセスが死ぬ前に証�
 
 ## このPoCが示すこと
 
-Pythonで実装した最小構成のPoCであり、以下の5ステップが一連の流れとして動作することを示す：
+Elixir / OTP で実装した最小構成のPoCであり、以下の5ステップが一連の流れとして動作することを示す：
 
-1. XSS・SQLiパターンの検知
-2. プロセス終了前にフォレンジック情報をファイルへ書き出し
-3. `os._exit(1)` による即時自壊
-4. `supervisord` による自動再起動
-5. 起動時にブロックリストを読み込み、同一IPを403で拒否
+1. XSS・SQLiパターンの並列検知（`Task.async_stream`）
+2. プロセス終了前にフォレンジック情報（攻撃内容 + ErlangVM詳細）をファイルへ書き出し
+3. `exit(:attack_detected)` による即時自壊
+4. OTP Supervisorによる自動再起動
+5. 起動後もETSテーブルにブロックリストが維持され、同一IPを403で拒否
 
 ---
 
@@ -293,6 +280,6 @@ Pythonで実装した最小構成のPoCであり、以下の5ステップが一�
 | フェーズ | 言語 | 目標 |
 |---------|------|------|
 | Phase 1 | Python | 概念実証 ✅ |
-| Phase 2 | Elixir / OTP | Supervisorツリーによるプロセスレベル揮発性 |
+| Phase 2 | Elixir / OTP | Supervisorツリーによるプロセスレベル揮発性 ✅ |
 | Phase 3 | Elixir + Kubernetes | L1〜L3の多段揮発性の完成 |
 | Phase 4 | — | arXiv論文 + OSS公開 |
