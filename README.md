@@ -313,7 +313,7 @@ kubectl get pods -l app=vcd
 | Phase | Language | Target | Status |
 |-------|----------|--------|--------|
 | Phase 1 | Python | Concept validation | ✅ Complete — [see phase1/python](https://github.com/nanikore7250/VolatileCyberDefense/tree/phase1/python) |
-| Phase 2 | Elixir / OTP | Process-level volatility with Supervisor trees | ✅ Complete |
+| Phase 2 | Elixir / OTP | Process-level volatility with Supervisor trees | ✅ Complete — [see phase1/python](https://github.com/nanikore7250/VolatileCyberDefense/tree/phase2/elixir) |
 | Phase 3 | Elixir + Kubernetes | Multi-layer volatility (L1–L3) | ✅ Complete |
 | Phase 4 | — | arXiv paper + OSS release | 🔲 Planned |
 
