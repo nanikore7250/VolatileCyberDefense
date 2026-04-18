@@ -12,3 +12,6 @@ data:
   # Forensic log path (shared with sidecar via emptyDir volume)
   FORENSICS_PATH: "/var/vcd/forensics.jsonl"
   BLOCKLIST_PATH: "/var/vcd/blocklist.txt"
+
+  # NetworkPolicy sync interval (seconds)
+  SYNC_INTERVAL: "30"

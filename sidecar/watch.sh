@@ -31,8 +31,13 @@ send_to_redis() {
 
 wait_for_file
 
-# Track last seen line count
-last_line=0
+# Process any lines already present before inotify starts (handles restart/race)
+last_line=$(wc -l < "$FORENSICS_PATH")
+if [ "$last_line" -gt 0 ]; then
+  tail -n +"1" "$FORENSICS_PATH" | while IFS= read -r line; do
+    [ -n "$line" ] && send_to_redis "$line"
+  done
+fi
 
 inotifywait -m -e modify --format '%e' "$FORENSICS_PATH" 2>/dev/null | while read -r _event; do
   current_line=$(wc -l < "$FORENSICS_PATH")

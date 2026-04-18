@@ -16,6 +16,7 @@ spec:
     spec:
       # Must be longer than shutdown.timeout_ms to allow graceful drain
       terminationGracePeriodSeconds: 30
+      serviceAccountName: vcd-sidecar
 
       volumes:
         - name: forensics

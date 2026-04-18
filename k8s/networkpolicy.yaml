@@ -1,9 +1,9 @@
 ---
-# Allow inbound HTTP to vcd-app from anywhere within the cluster
+# Allow inbound HTTP to vcd-app; blocked IPs are patched into except[] by the sidecar
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: vcd-allow-ingress
+  name: vcd-block-policy
 spec:
   podSelector:
     matchLabels:
@@ -11,16 +11,20 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    - ports:
+    - from:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: []    # sidecar patches this list every SYNC_INTERVAL seconds
+      ports:
         - protocol: TCP
           port: 4000
 
 ---
-# Allow vcd-sidecar to reach Redis; deny all other egress from the pod
+# Allow vcd-sidecar to reach Redis and the Kubernetes API; deny all other egress
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: vcd-egress-redis-only
+  name: vcd-egress-policy
 spec:
   podSelector:
     matchLabels:
@@ -35,7 +39,16 @@ spec:
       ports:
         - protocol: TCP
           port: 6379
-    # Allow DNS resolution
+    # Kubernetes API server (for NetworkPolicy patching)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    # DNS
     - ports:
         - protocol: UDP
           port: 53
