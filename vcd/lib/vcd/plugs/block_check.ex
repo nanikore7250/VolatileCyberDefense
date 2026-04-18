@@ -3,6 +3,11 @@ defmodule VCD.Plugs.BlockCheck do
 
   def init(opts), do: opts
 
+  # k8s probes must always reach health endpoints regardless of blocklist
+  @health_paths ["/healthz/live", "/healthz/ready"]
+
+  def call(%{request_path: path} = conn, _opts) when path in @health_paths, do: conn
+
   def call(conn, _opts) do
     ip = conn.remote_ip |> :inet.ntoa() |> to_string()
 

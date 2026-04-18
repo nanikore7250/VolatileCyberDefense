@@ -185,13 +185,74 @@ cat /var/vcd/forensics.jsonl
 
 ---
 
+## Phase 3 — Elixir + Kubernetes (L2 Container Volatility)
+
+Phase 3 adds **Graceful Volatile Shutdown**: when a high-severity attack is detected, the container signals Kubernetes via the Readiness Probe and terminates cleanly, triggering a fresh Pod replacement.
+
+### Multi-layer shutdown flow
+
+```
+① Attack process exits immediately  (L1 — milliseconds)
+② ShutdownState sets shutting_down = true
+③ /healthz/ready returns 503  →  k8s removes Pod from Service endpoints
+④ In-flight requests drain  (graceful mode waits timeout_ms)
+⑤ VM calls System.stop(0)  →  Pod terminates  →  k8s schedules new Pod  (L2 — seconds)
+```
+
+### Severity-based branching
+
+| Severity | Trigger | Self-destruct level |
+|----------|---------|---------------------|
+| `:low` | Single XSS / SQLi | L1 only — process restarts, container continues |
+| `:high` | 3+ attacks from same IP in 60s, or destructive SQL | L1 + L2 — full container replacement |
+
+### Shutdown modes
+
+| Mode | Behavior |
+|------|----------|
+| `:strict` | Terminate VM immediately |
+| `:graceful` | Wait `timeout_ms` for in-flight requests, then stop |
+| `:timeout` | Same as graceful — max wait then force stop |
+
+`terminationGracePeriodSeconds` in the Deployment must exceed `timeout_ms`.
+
+### Structure added in Phase 3
+
+```
+vcd/lib/vcd/
+└── shutdown_state.ex   # GenServer — manages L2 shutdown lifecycle
+
+k8s/
+├── deployment.yaml     # Pod (vcd-app + vcd-sidecar), probes, volumes
+├── service.yaml        # ClusterIP Service
+├── networkpolicy.yaml  # Egress: sidecar → Redis only
+└── configmap.yaml      # Shutdown mode / paths
+
+sidecar/
+├── watch.sh            # inotify → Redis forwarding script
+└── Dockerfile          # alpine + inotify-tools + redis-cli
+```
+
+### Sidecar data flow
+
+```
+vcd-app  →  /var/vcd/forensics.jsonl  (emptyDir volume)
+                    ↓ inotify
+vcd-sidecar  →  Redis RPUSH vcd:forensics
+             →  Redis SADD vcd:blocked_ips  (for netpol integration)
+
+※ No reverse communication from sidecar to app
+```
+
+---
+
 ## Roadmap
 
 | Phase | Language | Target | Status |
 |-------|----------|--------|--------|
 | Phase 1 | Python | Concept validation | ✅ Complete — [see phase1/python](https://github.com/nanikore7250/VolatileCyberDefense/tree/phase1/python) |
 | Phase 2 | Elixir / OTP | Process-level volatility with Supervisor trees | ✅ Complete |
-| Phase 3 | Elixir + Kubernetes | Multi-layer volatility (L1–L3) | 🔲 Planned |
+| Phase 3 | Elixir + Kubernetes | Multi-layer volatility (L1–L3) | ✅ Complete |
 | Phase 4 | — | arXiv paper + OSS release | 🔲 Planned |
 
 ---
@@ -281,5 +342,5 @@ Elixir / OTP で実装した最小構成のPoCであり、以下の5ステップ
 |---------|------|------|
 | Phase 1 | Python | 概念実証 ✅ |
 | Phase 2 | Elixir / OTP | Supervisorツリーによるプロセスレベル揮発性 ✅ |
-| Phase 3 | Elixir + Kubernetes | L1〜L3の多段揮発性の完成 |
+| Phase 3 | Elixir + Kubernetes | L1〜L3の多段揮発性の完成 ✅ |
 | Phase 4 | — | arXiv論文 + OSS公開 |

@@ -11,6 +11,21 @@ defmodule VCD.Router do
   plug VCD.Plugs.AttackDetect
   plug :dispatch
 
+  # Health check endpoints — must be before BlockCheck/AttackDetect in the pipeline,
+  # so they are placed outside the plug pipeline using forward or raw match.
+  # These routes bypass BlockCheck intentionally: k8s probes must always reach them.
+  get "/healthz/live" do
+    send_resp(conn, 200, "ok")
+  end
+
+  get "/healthz/ready" do
+    if VCD.ShutdownState.shutting_down?() do
+      send_resp(conn, 503, "shutting down")
+    else
+      send_resp(conn, 200, "ok")
+    end
+  end
+
   get "/" do
     conn
     |> put_resp_content_type("text/html")

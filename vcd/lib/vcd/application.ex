@@ -6,6 +6,7 @@ defmodule Vcd.Application do
   def start(_type, _args) do
     children = [
       VCD.BlockList,
+      VCD.ShutdownState,
       {Plug.Cowboy, scheme: :http, plug: VCD.Router, options: [port: 4000]}
     ]
 

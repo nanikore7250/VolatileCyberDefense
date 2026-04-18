@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vcd-config
+data:
+  # Shutdown behavior (corresponds to config :vcd, :shutdown in prod.exs)
+  # mode: strict | graceful | timeout
+  SHUTDOWN_MODE: "graceful"
+  # Must be shorter than terminationGracePeriodSeconds in deployment.yaml
+  SHUTDOWN_TIMEOUT_MS: "5000"
+
+  # Forensic log path (shared with sidecar via emptyDir volume)
+  FORENSICS_PATH: "/var/vcd/forensics.jsonl"
+  BLOCKLIST_PATH: "/var/vcd/blocklist.txt"
