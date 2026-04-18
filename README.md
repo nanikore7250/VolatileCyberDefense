@@ -269,6 +269,8 @@ kubectl rollout status deployment/vcd-app
 
 ### Attack simulation (Kubernetes)
 
+> **Note on `kubectl port-forward`**: port-forward creates a tunnel that bypasses NetworkPolicy entirely. Traffic arriving via port-forward always appears as `127.0.0.1` to the app, so the **application-layer blocklist (ETS → 403 Forbidden)** fires correctly, but the **NetworkPolicy-layer block has no effect** on port-forwarded connections. This is expected — see [Verifying NetworkPolicy blocking](#verifying-networkpolicy-blocking) below for in-cluster testing.
+
 Forward a pod port to localhost, then run the same attack sequence:
 
 ```bash
@@ -305,6 +307,56 @@ kubectl get pods -l app=vcd
 # vcd-app-zzzzz-aaaaa      2/2     Running   ← new clean pod
 # vcd-app-zzzzz-bbbbb      2/2     Running   ← new clean pod
 ```
+
+### Verifying NetworkPolicy blocking
+
+NetworkPolicy operates at the pod network layer and only affects traffic routed through the CNI (pod-to-pod, service-to-pod). To verify that a blocked IP is dropped at the network layer, send requests from a pod inside the cluster:
+
+```bash
+# Launch a temporary curl pod inside the cluster
+kubectl run curl-test --image=curlimages/curl --restart=Never --rm -it -- sh
+
+# Inside the pod — attack from this pod's IP
+curl -X POST -d "username=<script>alert(1)</script>" http://vcd:4000/welcome
+# → connection succeeds, attack detected, this pod's IP is blocked
+
+# After SYNC_INTERVAL (30s), the NetworkPolicy is patched.
+# Subsequent requests from this pod are dropped at the network layer (connection timeout),
+# not rejected with 403 — the packet never reaches the app.
+curl --max-time 5 http://vcd:4000/
+# → curl: (28) Operation timed out  ← NetworkPolicy drop confirmed
+```
+
+Check that the NetworkPolicy was patched:
+
+```bash
+kubectl get networkpolicy vcd-block-policy \
+  -o jsonpath='{.spec.ingress[0].from[0].ipBlock}' | python3 -m json.tool
+# {
+#   "cidr": "0.0.0.0/0",
+#   "except": ["<pod-ip>/32"]
+# }
+```
+
+### Unblocking IPs (for repeated testing)
+
+After an attack, the attacker's IP is persisted in three places. Clear all three to reset state:
+
+```bash
+POD=$(kubectl get pod -l app=vcd -o jsonpath='{.items[0].metadata.name}')
+
+# 1. Clear application-layer blocklist (ETS + blocklist.txt) via VCD.BlockList.clear/0
+kubectl exec $POD -c vcd-app -- /app/_build/prod/rel/vcd/bin/vcd rpc "VCD.BlockList.clear()"
+
+# 2. Remove IP(s) from Redis
+kubectl exec $POD -c vcd-sidecar -- sh -c 'redis-cli -u "$REDIS_URL" DEL vcd:blocked_ips'
+
+# 3. Patch NetworkPolicy to clear except[] list
+kubectl patch networkpolicy vcd-block-policy --type=merge \
+  -p '{"spec":{"ingress":[{"from":[{"ipBlock":{"cidr":"0.0.0.0/0","except":[]}}],"ports":[{"protocol":"TCP","port":4000}]}]}}'
+```
+
+> **Note**: Steps 2 and 3 are only needed in a Kubernetes environment. In local dev (`mix run`), blocklist is automatically cleared on self-destruct because `debug: true` is set in `dev.exs`.
 
 ---
 
