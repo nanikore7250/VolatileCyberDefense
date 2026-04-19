@@ -22,7 +22,8 @@ defmodule Proxy.MixProject do
   defp deps do
     [
       {:plug_cowboy, "~> 2.0"},
-      {:req, "~> 0.5"}
+      {:req, "~> 0.5"},
+      {:jason, "~> 1.4"}
     ]
   end
 end

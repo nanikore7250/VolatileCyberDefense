@@ -8,6 +8,7 @@ defmodule Proxy.Router do
 
   @upstream Application.compile_env(:proxy, :upstream, "http://localhost:5000")
 
+  plug Proxy.Plugs.AttackDetect
   plug :match
   plug :dispatch
 
@@ -22,7 +23,7 @@ defmodule Proxy.Router do
       conn.req_headers
       |> Enum.reject(fn {k, _} -> k in ["host", "transfer-encoding"] end)
 
-    body = read_request_body(conn)
+    body = conn.assigns[:raw_body] || read_request_body(conn)
 
     result =
       Req.new(url: url, method: conn.method |> String.downcase() |> String.to_atom())
